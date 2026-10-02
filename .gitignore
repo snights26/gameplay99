@@ -1,0 +1,16 @@
+.gradle/
+.kotlin/
+.android-sdk/
+.tools/
+build/
+android-app/build/
+local.properties
+*.iml
+.idea/
+backend/node_modules/
+backend/dist/
+backend/.env
+backend/.vercel/
+*.apk
+*.log
+
