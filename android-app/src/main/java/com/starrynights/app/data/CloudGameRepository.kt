@@ -19,9 +19,11 @@ import com.starrynights.app.model.StartingRelationship
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -89,7 +91,8 @@ interface StarryNightsApi {
     @GET("api/v1/circles") suspend fun circles(@Header("X-Trial-User-Id") userId: String): List<CloudCircle>
     @POST("api/v1/circles") suspend fun createCircle(@Header("X-Trial-User-Id") userId: String, @Body circle: CloudCircle): CloudCircle
     @PUT("api/v1/circles/{id}") suspend fun updateCircle(@Header("X-Trial-User-Id") userId: String, @Path("id") id: String, @Body circle: CloudCircle)
-    @GET("api/v1/sessions/active") suspend fun activeSession(@Header("X-Trial-User-Id") userId: String): CloudSession?
+    /** The API returns the valid JSON literal `null` when this trial user has no active session. */
+    @GET("api/v1/sessions/active") suspend fun activeSession(@Header("X-Trial-User-Id") userId: String): JsonElement
     @POST("api/v1/sessions") suspend fun createSession(@Header("X-Trial-User-Id") userId: String, @Body request: SessionRequest): CloudSession
     @POST("api/v1/sessions/{id}/sync") suspend fun sync(@Header("X-Trial-User-Id") userId: String, @Path("id") id: String, @Body snapshot: SyncRequest): SyncResponse
 }
@@ -127,7 +130,7 @@ class CloudGameRepository(private val api: StarryNightsApi) : GameRepository {
         }
         return circle.copy(id = requireNotNull(result.id) { "Cloud circle save did not return an id." })
     }
-    override suspend fun resumeActiveSession(userId: String): CloudSession? = api.activeSession(userId)
+    override suspend fun resumeActiveSession(userId: String): CloudSession? = api.activeSession(userId).toCloudSessionOrNull()
     override suspend fun createStorySession(userId: String, characterIds: List<String>, state: BlindDateState): CloudSession = api.createSession(
         userId, SessionRequest(state.scenario.id, state.mode.name, characterIds, state.relationshipStart.name, state.circle?.id?.ifBlank { null }, state.toSnapshot())
     )
@@ -151,13 +154,12 @@ class NoPersistenceGameRepository : GameRepository {
 
 object ApiFactory {
     fun create(): StarryNightsApi {
-        val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
         val logger = HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC }
         val client = OkHttpClient.Builder().addInterceptor(logger).connectTimeout(10, TimeUnit.SECONDS).build()
         return retrofit2.Retrofit.Builder()
             .baseUrl(ApiConfiguration.baseUrl)
             .client(client)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+            .addConverterFactory(cloudJson.asConverterFactory("application/json".toMediaType()))
             .build().create(StarryNightsApi::class.java)
     }
 }
@@ -197,6 +199,8 @@ private fun CloudCharacter.toFictionalAdult(): FictionalAdult? {
 }
 
 private fun BlindDateState.toSnapshot(): JsonObject = Json.encodeToJsonElement(this).jsonObject
+private fun JsonElement.toCloudSessionOrNull(): CloudSession? =
+    (this as? JsonObject)?.let { cloudJson.decodeFromJsonElement<CloudSession>(it) }
 private fun Circle.toCloudCircle(): CloudCircle = CloudCircle(
     id = id.ifBlank { null }, name = name, startingRelationship = startingRelationship.name,
     configuration = buildJsonObject { configuration.forEach { (key, value) -> put(key, value) } },
@@ -225,4 +229,6 @@ private fun parseDesireProfile(values: JsonObject): DesireProfile = DesireProfil
 )
 private fun eventId(state: BlindDateState, eventType: String): String =
     state.log.lastOrNull()?.id ?: UUID.nameUUIDFromBytes("${eventType}:${state.story.sceneNumber}".toByteArray()).toString()
+
+private val cloudJson = Json { ignoreUnknownKeys = true; explicitNulls = false }
 

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Deep blue sampled from the supplied Starry Nights artwork. -->
+    <color name="launcher_icon_background">#FF003D63</color>
+</resources>

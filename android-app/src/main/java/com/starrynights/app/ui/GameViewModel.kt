@@ -1,6 +1,7 @@
 package com.starrynights.app.ui
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.starrynights.app.data.ApiFactory
@@ -82,7 +83,8 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
                 sessionId = activeSession?.id,
                 backendMessage = restoreMessage
             )
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.e("StarryNights", "Cloud bootstrap failed after API initialization.", error)
             _ui.value = _ui.value.copy(
                 loading = false, consentKnown = true, hasConsent = false,
                 backendMessage = "Cloud connection is unavailable. Retry when the API is reachable; important progress is saved only after a successful cloud sync."

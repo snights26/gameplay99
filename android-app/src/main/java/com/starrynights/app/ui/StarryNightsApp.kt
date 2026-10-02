@@ -1,6 +1,5 @@
 package com.starrynights.app.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,6 +24,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.TextUnit
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
@@ -66,8 +66,11 @@ fun StarryNightsApp(viewModel: GameViewModel = viewModel()) {
     MaterialTheme(colorScheme = StarryScheme) {
         Box(Modifier.fillMaxSize().background(Ink)) {
             StarField()
-            if (state.loading) LoadingScreen()
-            else AppNav(nav, viewModel, state)
+            // Content deliberately stays inside the display cutout/status and gesture/navigation safe areas.
+            Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+                if (state.loading) LoadingScreen()
+                else AppNav(nav, viewModel, state)
+            }
         }
     }
 }
@@ -102,7 +105,7 @@ private fun StarField() = Canvas(Modifier.fillMaxSize()) {
 private fun LoadingScreen() = Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("✦", color = Magenta, fontSize = 48.sp)
-        Text("STARRY NIGHTS", fontWeight = FontWeight.Black, letterSpacing = 4.sp)
+        TitleBanner("STARRY NIGHTS", fontSize = 20.sp)
         Spacer(Modifier.height(20.dp)); CircularProgressIndicator(color = Magenta)
     }
 }
@@ -112,7 +115,7 @@ private fun ConsentScreen(state: AppUiState, onAccept: () -> Unit, onRetry: () -
     if (state.hasConsent) LaunchedEffect(Unit) { onAccepted() }
     var checked by remember { mutableStateOf(false) }
     CenteredPage {
-        Text("STARRY NIGHTS", color = Magenta, fontWeight = FontWeight.Black, letterSpacing = 5.sp, fontSize = 22.sp)
+        TitleBanner("STARRY NIGHTS")
         Spacer(Modifier.height(26.dp))
         NeonCard {
             Text("ADULTS ONLY — 18+", fontSize = 25.sp, fontWeight = FontWeight.Black)
@@ -136,7 +139,7 @@ private fun SplashScreen(onDone: () -> Unit) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("✦", color = Magenta, fontSize = 80.sp)
-            Text("STARRY NIGHTS", fontWeight = FontWeight.Black, fontSize = 30.sp, letterSpacing = 5.sp)
+            TitleBanner("STARRY NIGHTS", fontSize = 28.sp, letterSpacing = 5.sp)
             Text("Explore Your Dark Desire", color = TextSoft, modifier = Modifier.padding(top = 12.dp))
         }
     }
@@ -145,7 +148,7 @@ private fun SplashScreen(onDone: () -> Unit) {
 @Composable
 private fun HomeScreen(state: AppUiState, onNewStory: () -> Unit, onBlindDate: () -> Unit, onResume: () -> Unit, onWeb: () -> Unit, onLibrary: () -> Unit, onScenarios: () -> Unit, onRetry: () -> Unit) {
     Page {
-        Text("STARRY NIGHTS", color = Magenta, fontWeight = FontWeight.Black, letterSpacing = 4.sp, fontSize = 22.sp)
+        TitleBanner("STARRY NIGHTS")
         Text("Create the chemistry. Discover what happens after dark.", color = TextSoft)
         Spacer(Modifier.height(28.dp))
         HomeOption("NEW STORY", "Choose a social world or make a first connection.", onNewStory)
@@ -430,40 +433,61 @@ private fun SceneScreen(
     }
     var timing by remember { mutableFloatStateOf(.7f) }
     var privateLocation by remember(game.focusCharacterId) { mutableStateOf(privateMomentLocations.first()) }
-    Page(outerPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) { TextButton(onClick = onBack) { Text("‹") }; Column(Modifier.weight(1f)) { Text("${game.scenario.name.uppercase()} • ${game.story.currentLocation.uppercase()}", fontWeight = FontWeight.Bold); Text("${game.mode.name.replace('_', ' ')} • ${game.story.phase.replace('_', ' ')}", color = Magenta, fontSize = 12.sp) }; TextButton(onClick = onWeb) { Text("WEB") } }
-        HeatMeter(game.heat)
-        RelationshipClues(game)
+    // SceneScreen owns the only vertical scroll. Keeping the log in this root LazyColumn
+    // prevents it from being measured with the unbounded height of Page.verticalScroll().
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) { TextButton(onClick = onBack) { Text("‹") }; Column(Modifier.weight(1f)) { TitleBanner("${game.scenario.name.uppercase()} • ${game.story.currentLocation.uppercase()}", fontSize = 13.sp, letterSpacing = 1.sp); Text("${game.mode.name.replace('_', ' ')} • ${game.story.phase.replace('_', ' ')}", color = Magenta, fontSize = 12.sp) }; TextButton(onClick = onWeb) { Text("WEB") } }
+        }
+        item { HeatMeter(game.heat) }
+        item { RelationshipClues(game) }
         if (game.participants.size > 1) {
-            Text("FOCUS", color = Magenta, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-            Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp)) { game.participants.forEach { character -> FilterChip(selected = game.focusCharacterId == character.id, onClick = { onFocus(character.id) }, label = { Text(character.name) }, modifier = Modifier.padding(end = 6.dp)) } }
-        }
-        Spacer(Modifier.height(6.dp))
-        NeonCard(Modifier.fillMaxWidth().heightIn(min = 315.dp)) {
-            LazyColumn(reverseLayout = false, modifier = Modifier.fillMaxWidth()) { items(game.log, key = { it.id }) { entry -> SceneLogLine(entry) } }
-        }
-        if (!game.ended) {
-            Spacer(Modifier.height(10.dp))
-            Text("REACTION TIMING", color = TextSoft, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            Slider(value = timing, onValueChange = { timing = it }, colors = SliderDefaults.colors(thumbColor = Magenta, activeTrackColor = Magenta))
-            Text(if (timing in .58f..82f) "In the moment" else "A little off the rhythm", color = if (timing in .58f..82f) Purple else TextSoft, fontSize = 12.sp)
-            ActionGrid(game, onAction = { onAction(it, timing, game.focusCharacterId) })
-            if (game.scenario.roleplayCompatible.isNotEmpty()) OutlinedButton(onClick = onRoleplay, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("ROLEPLAY LENS") }
-            DirectorCardTray(game, onDirector)
-            AnimatedVisibility(game.privateOfferVisible) {
-                Column(Modifier.padding(top = 8.dp)) {
-                    Text("PRIVATE LOCATION", color = TextSoft, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    Row(Modifier.horizontalScroll(rememberScrollState())) { privateMomentLocations.forEach { location -> FilterChip(selected = privateLocation == location, onClick = { privateLocation = location }, label = { Text(location) }, modifier = Modifier.padding(end = 6.dp)) } }
-                    NeonButton("CONTINUE PRIVATE MOMENT", onClick = { onPrivate(privateLocation) })
+            item {
+                Column {
+                    Text("FOCUS", color = Magenta, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp)) { game.participants.forEach { character -> FilterChip(selected = game.focusCharacterId == character.id, onClick = { onFocus(character.id) }, label = { Text(character.name) }, modifier = Modifier.padding(end = 6.dp)) } }
                 }
             }
-            if (game.story.nextOptions.any { it in setOf("NEXT MORNING", "NEXT DAY", "CHANGE LOCATION") }) OutlinedButton(onClick = onAftermath, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("SEE AFTERMATH / CONTINUE STORY") }
-        } else {
-            Text("END-DATE OUTCOME — the connection stays in the story rather than resetting.", color = Purple, modifier = Modifier.padding(12.dp))
-            NeonButton("CONTINUE STORY", onClick = { onContinue(GameAction.CONTINUE_NIGHT) })
-            OutlinedButton(onClick = onAftermath, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("AFTERMATH") }
         }
-        backendMessage?.let { Text(it, color = Red, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)) }
+        item { Text("SCENE LOG", color = TextSoft, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+        if (game.log.isEmpty()) {
+            item { NeonCard(Modifier.fillMaxWidth()) { Text("The story will appear here as the scene unfolds.", color = TextSoft) } }
+        } else {
+            items(game.log, key = { it.id }) { entry ->
+                NeonCard(Modifier.fillMaxWidth()) { SceneLogLine(entry) }
+            }
+        }
+        if (!game.ended) {
+            item {
+                Column {
+                    Text("REACTION TIMING", color = TextSoft, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Slider(value = timing, onValueChange = { timing = it }, colors = SliderDefaults.colors(thumbColor = Magenta, activeTrackColor = Magenta))
+                    Text(if (timing in .58f..82f) "In the moment" else "A little off the rhythm", color = if (timing in .58f..82f) Purple else TextSoft, fontSize = 12.sp)
+                }
+            }
+            item { ActionGrid(game, onAction = { onAction(it, timing, game.focusCharacterId) }) }
+            if (game.scenario.roleplayCompatible.isNotEmpty()) item { OutlinedButton(onClick = onRoleplay, modifier = Modifier.fillMaxWidth()) { Text("ROLEPLAY LENS") } }
+            item { DirectorCardTray(game, onDirector) }
+            if (game.privateOfferVisible) {
+                item {
+                    Column {
+                        Text("PRIVATE LOCATION", color = TextSoft, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Row(Modifier.horizontalScroll(rememberScrollState())) { privateMomentLocations.forEach { location -> FilterChip(selected = privateLocation == location, onClick = { privateLocation = location }, label = { Text(location) }, modifier = Modifier.padding(end = 6.dp)) } }
+                        NeonButton("CONTINUE PRIVATE MOMENT", onClick = { onPrivate(privateLocation) })
+                    }
+                }
+            }
+            if (game.story.nextOptions.any { it in setOf("NEXT MORNING", "NEXT DAY", "CHANGE LOCATION") }) item { OutlinedButton(onClick = onAftermath, modifier = Modifier.fillMaxWidth()) { Text("SEE AFTERMATH / CONTINUE STORY") } }
+        } else {
+            item { Text("END-DATE OUTCOME — the connection stays in the story rather than resetting.", color = Purple, modifier = Modifier.padding(12.dp)) }
+            item { NeonButton("CONTINUE STORY", onClick = { onContinue(GameAction.CONTINUE_NIGHT) }) }
+            item { OutlinedButton(onClick = onAftermath, modifier = Modifier.fillMaxWidth()) { Text("AFTERMATH") } }
+        }
+        backendMessage?.let { message -> item { Text(message, color = Red, fontSize = 12.sp) } }
     }
 }
 
@@ -575,8 +599,26 @@ private fun NeonCard(modifier: Modifier = Modifier, content: @Composable ColumnS
 private fun NeonButton(text: String, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit) = Button(onClick = onClick, enabled = enabled, modifier = modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Magenta, disabledContainerColor = Panel)) { Text(text, fontWeight = FontWeight.Bold) }
 
 @Composable
-private fun BackTitle(title: String, onBack: () -> Unit) = Row(verticalAlignment = Alignment.CenterVertically) { TextButton(onClick = onBack) { Text("‹ BACK") }; Text(title, fontSize = 23.sp, fontWeight = FontWeight.Black, color = Magenta) }
+private fun TitleBanner(title: String, modifier: Modifier = Modifier, fontSize: TextUnit = 22.sp, letterSpacing: TextUnit = 4.sp) = Surface(
+    modifier = modifier,
+    shape = RoundedCornerShape(12.dp),
+    color = Color(0xFFFFF1F8)
+) {
+    Text(
+        title,
+        color = Color.Black,
+        fontSize = fontSize,
+        fontWeight = FontWeight.Black,
+        letterSpacing = letterSpacing,
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+    )
+}
+
+@Composable
+private fun BackTitle(title: String, onBack: () -> Unit) = Row(verticalAlignment = Alignment.CenterVertically) {
+    TextButton(onClick = onBack) { Text("‹ BACK") }
+    TitleBanner(title, fontSize = 20.sp, letterSpacing = 2.sp)
+}
 
 @Composable
 private fun BackOnly(onBack: () -> Unit) = Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Button(onClick = onBack) { Text("BACK") } }
-
