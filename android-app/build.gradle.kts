@@ -5,6 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val productionApiBaseUrl = "https://backend-4iw3.vercel.app/"
+
 android {
     namespace = "com.starrynights.app"
     compileSdk = 35
@@ -20,12 +22,12 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:3000/\"")
+            buildConfigField("String", "API_BASE_URL", "\"$productionApiBaseUrl\"")
             manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
         release {
             isMinifyEnabled = false
-            buildConfigField("String", "API_BASE_URL", "\"https://replace-with-your-api.example/\"")
+            buildConfigField("String", "API_BASE_URL", "\"$productionApiBaseUrl\"")
             manifestPlaceholders["usesCleartextTraffic"] = "false"
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
