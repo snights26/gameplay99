@@ -36,6 +36,11 @@ app.get("/health", async (_request, response) => {
   response.json({ status: "ok" });
 });
 
+app.get("/api/v1/health", async (_request, response) => {
+  await query("SELECT 1");
+  response.json({ status: "ok" });
+});
+
 app.post("/api/v1/trial/bootstrap", async (request, response) => {
   const { installId } = bootstrapSchema.parse(request.body);
   const installHash = crypto.createHash("sha256").update(installId).digest("hex");
@@ -130,6 +135,16 @@ function characterResponse(character: Record<string, unknown>) {
   };
 }
 
+function circleResponse(circle: Record<string, unknown>) {
+  return {
+    id: circle.id,
+    name: circle.name,
+    startingRelationship: circle.starting_relationship,
+    configuration: circle.configuration,
+    members: circle.members
+  };
+}
+
 app.delete("/api/v1/characters/:id", async (request, response) => {
   const result = await query("DELETE FROM characters WHERE id=$1 AND owner_user_id=$2 RETURNING id", [uuid.parse(request.params.id), userId(request)]);
   if (!result.rowCount) throw new HttpError(404, "Character not found.");
@@ -143,7 +158,7 @@ app.get("/api/v1/circles", async (request, response) => {
      FROM circles c LEFT JOIN circle_members cm ON cm.circle_id=c.id LEFT JOIN characters ch ON ch.id=cm.character_id
      WHERE c.owner_user_id=$1 GROUP BY c.id ORDER BY c.updated_at DESC`, [userId(request)]
   );
-  response.json(result.rows);
+  response.json(result.rows.map(circleResponse));
 });
 
 app.post("/api/v1/circles", async (request, response) => {
@@ -152,11 +167,20 @@ app.post("/api/v1/circles", async (request, response) => {
   const result = await withTransaction(async (client) => {
     const owned = await client.query("SELECT id FROM characters WHERE owner_user_id=$1 AND id=ANY($2::uuid[])", [ownerUserId, circle.characterIds]);
     if (owned.rowCount !== circle.characterIds.length) throw new HttpError(400, "A circle can only contain your own characters.");
-    const created = await client.query<{ id: string }>("INSERT INTO circles(owner_user_id,name) VALUES($1,$2) RETURNING id", [ownerUserId, circle.name]);
+    const created = await client.query<{ id: string }>(
+      "INSERT INTO circles(owner_user_id,name,starting_relationship,configuration) VALUES($1,$2,$3,$4) RETURNING id",
+      [ownerUserId, circle.name, circle.startingRelationship, circle.configuration]
+    );
     for (const [order, characterId] of circle.characterIds.entries()) await client.query("INSERT INTO circle_members(circle_id,character_id,display_order) VALUES($1,$2,$3)", [created.rows[0].id, characterId, order]);
     return created.rows[0];
   });
-  response.status(201).json(result);
+  response.status(201).json({
+    id: result.id,
+    name: circle.name,
+    startingRelationship: circle.startingRelationship,
+    configuration: circle.configuration,
+    members: circle.characterIds.map((id, displayOrder) => ({ id, displayOrder }))
+  });
 });
 
 app.put("/api/v1/circles/:id", async (request, response) => {
@@ -164,7 +188,10 @@ app.put("/api/v1/circles/:id", async (request, response) => {
   const circleId = uuid.parse(request.params.id);
   const circle = circleSchema.parse(request.body);
   await withTransaction(async (client) => {
-    const updated = await client.query("UPDATE circles SET name=$3,updated_at=now() WHERE id=$1 AND owner_user_id=$2 RETURNING id", [circleId, ownerUserId, circle.name]);
+    const updated = await client.query(
+      "UPDATE circles SET name=$3,starting_relationship=$4,configuration=$5,updated_at=now() WHERE id=$1 AND owner_user_id=$2 RETURNING id",
+      [circleId, ownerUserId, circle.name, circle.startingRelationship, circle.configuration]
+    );
     if (!updated.rowCount) throw new HttpError(404, "Circle not found.");
     const owned = await client.query("SELECT id FROM characters WHERE owner_user_id=$1 AND id=ANY($2::uuid[])", [ownerUserId, circle.characterIds]);
     if (owned.rowCount !== circle.characterIds.length) throw new HttpError(400, "A circle can only contain your own characters.");
@@ -175,7 +202,7 @@ app.put("/api/v1/circles/:id", async (request, response) => {
 });
 
 app.get("/api/v1/scenarios", async (_request, response) => {
-  const result = await query("SELECT id, name, description, locations, participant_min, participant_max, available_actions, heat_modifier, roleplay_compatibility FROM scenarios ORDER BY name");
+  const result = await query("SELECT id, name, description, locations, participant_min, participant_max, scene_phases, event_pool, available_actions, heat_modifier, roleplay_compatibility FROM scenarios ORDER BY name");
   response.json(result.rows);
 });
 
@@ -197,10 +224,23 @@ app.post("/api/v1/sessions", async (request, response) => {
     if (!consent.rowCount) throw new HttpError(403, "Adults-only data consent is required before starting a story.");
     const validCharacters = await client.query("SELECT id FROM characters WHERE owner_user_id=$1 AND id = ANY($2::uuid[])", [ownerUserId, input.participantCharacterIds]);
     if (validCharacters.rowCount !== input.participantCharacterIds.length) throw new HttpError(400, "One or more selected characters are invalid.");
+    if (input.circleId) {
+      const selectedCircle = await client.query(
+        "SELECT id FROM circles WHERE id=$1 AND owner_user_id=$2",
+        [input.circleId, ownerUserId]
+      );
+      if (!selectedCircle.rowCount) throw new HttpError(400, "The selected circle is invalid.");
+      const members = await client.query<{ character_id: string }>("SELECT character_id FROM circle_members WHERE circle_id=$1", [input.circleId]);
+      const memberIds = new Set(members.rows.map((member) => member.character_id));
+      if (input.participantCharacterIds.some((characterId) => !memberIds.has(characterId))) {
+        throw new HttpError(400, "A session loaded from a circle can only include that circle's members.");
+      }
+    }
+    const storyState = record(input.state.story);
     const session = await client.query<{ id: string }>(
-      `INSERT INTO game_sessions (owner_user_id, scenario_id, mode, relationship_start, status, current_state)
-       VALUES ($1,$2,$3,$4,'ACTIVE',$5) RETURNING id`,
-      [ownerUserId, input.scenarioId, input.mode, input.relationshipStart, input.state]
+      `INSERT INTO game_sessions (owner_user_id, scenario_id, mode, relationship_start, circle_id, status, current_state, story_state)
+       VALUES ($1,$2,$3,$4,$5,'ACTIVE',$6,$7) RETURNING id`,
+      [ownerUserId, input.scenarioId, input.mode, input.relationshipStart, input.circleId ?? null, input.state, storyState]
     );
     const player = await client.query<{ id: string }>(
       "INSERT INTO session_participants (session_id, participant_type, display_name) VALUES ($1,'PLAYER','Player') RETURNING id",
@@ -226,6 +266,7 @@ app.post("/api/v1/sessions", async (request, response) => {
       }
     }
     await client.query("INSERT INTO session_snapshots (session_id, state) VALUES ($1,$2)", [session.rows[0].id, input.state]);
+    await syncStoryProjections(client, session.rows[0].id, input.state);
     return session.rows[0];
   });
   response.status(201).json(result);
@@ -243,13 +284,22 @@ app.get("/api/v1/sessions/:id", async (request, response) => {
   const ownerUserId = userId(request);
   const sessionId = uuid.parse(request.params.id);
   await verifyOwner(sessionId, ownerUserId);
-  const [session, participants, relationships, events] = await Promise.all([
+  const [session, participants, relationships, events, story, roles, discoveries, directorCards] = await Promise.all([
     query("SELECT * FROM game_sessions WHERE id=$1", [sessionId]),
-    query("SELECT sp.*, c.name, c.personality, c.flirt_profile, c.intimacy_profile, c.hidden_traits FROM session_participants sp JOIN characters c ON c.id=sp.character_id WHERE sp.session_id=$1", [sessionId]),
+    query("SELECT sp.*, c.name, c.personality, c.communication_profile, c.flirt_profile, c.intimacy_profile, c.fantasy_profile, c.boundaries, c.hidden_traits FROM session_participants sp LEFT JOIN characters c ON c.id=sp.character_id WHERE sp.session_id=$1", [sessionId]),
     query("SELECT * FROM relationship_states WHERE session_id=$1", [sessionId]),
-    query("SELECT * FROM game_events WHERE session_id=$1 ORDER BY created_at DESC LIMIT 100", [sessionId])
+    query("SELECT * FROM game_events WHERE session_id=$1 ORDER BY created_at DESC LIMIT 100", [sessionId]),
+    query("SELECT * FROM session_story_state WHERE session_id=$1", [sessionId]),
+    query(`SELECT ra.participant_id, sr.name AS role_name FROM role_assignments ra
+      JOIN scenario_roles sr ON sr.id=ra.role_id WHERE ra.session_id=$1`, [sessionId]),
+    query("SELECT character_id, trait_key, discovered, discovered_at, metadata FROM session_trait_discoveries WHERE session_id=$1", [sessionId]),
+    query(`SELECT dc.card_key, sdcs.is_available, sdcs.is_applied, sdcs.applied_event_number, sdcs.metadata
+      FROM session_director_card_state sdcs JOIN director_cards dc ON dc.id=sdcs.director_card_id WHERE sdcs.session_id=$1`, [sessionId])
   ]);
-  response.json({ session: session.rows[0], participants: participants.rows, relationships: relationships.rows, events: events.rows.reverse() });
+  response.json({
+    session: session.rows[0], participants: participants.rows, relationships: relationships.rows, events: events.rows.reverse(),
+    story: story.rows[0] ?? null, roles: roles.rows, discoveries: discoveries.rows, directorCards: directorCards.rows
+  });
 });
 
 app.post("/api/v1/sessions/:id/events", async (request, response) => {
@@ -257,11 +307,12 @@ app.post("/api/v1/sessions/:id/events", async (request, response) => {
   await verifyOwner(sessionId, userId(request));
   const event = eventSchema.parse(request.body);
   const result = await query(
-    `INSERT INTO game_events (session_id, actor_participant_id, target_participant_id, event_type, payload)
-     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-    [sessionId, event.actorParticipantId ?? null, event.targetParticipantId ?? null, event.eventType, event.payload]
+    `INSERT INTO game_events (session_id, client_event_id, actor_participant_id, target_participant_id, event_type, payload)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (session_id, client_event_id) DO NOTHING RETURNING *`,
+    [sessionId, event.clientEventId ?? null, event.actorParticipantId ?? null, event.targetParticipantId ?? null, event.eventType, event.payload]
   );
-  response.status(201).json(result.rows[0]);
+  response.status(result.rowCount ? 201 : 200).json(result.rows[0] ?? { sessionId, duplicate: true });
 });
 
 app.post("/api/v1/sessions/:id/sync", async (request, response) => {
@@ -269,25 +320,50 @@ app.post("/api/v1/sessions/:id/sync", async (request, response) => {
   const ownerUserId = userId(request);
   const sync = syncSchema.parse(request.body);
   await verifyOwner(sessionId, ownerUserId);
-  await withTransaction(async (client) => {
-    await client.query("UPDATE game_sessions SET current_state=$2, updated_at=now() WHERE id=$1", [sessionId, sync.state]);
+  const eventsPersisted = await withTransaction(async (client) => {
+    const storyState = record(sync.state.story);
+    await client.query("UPDATE game_sessions SET current_state=$2, story_state=$3, updated_at=now() WHERE id=$1", [sessionId, sync.state, storyState]);
     await client.query("INSERT INTO session_snapshots (session_id,state) VALUES ($1,$2)", [sessionId, sync.state]);
+    let insertedEvents = 0;
     for (const event of sync.events) {
-      await client.query(
-        "INSERT INTO game_events (session_id,actor_participant_id,target_participant_id,event_type,payload) VALUES ($1,$2,$3,$4,$5)",
-        [sessionId, event.actorParticipantId ?? null, event.targetParticipantId ?? null, event.eventType, event.payload]
+      const inserted = await client.query(
+        `INSERT INTO game_events (session_id,client_event_id,actor_participant_id,target_participant_id,event_type,payload)
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (session_id,client_event_id) DO NOTHING`,
+        [sessionId, event.clientEventId ?? null, event.actorParticipantId ?? null, event.targetParticipantId ?? null, event.eventType, event.payload]
       );
+      insertedEvents += inserted.rowCount ?? 0;
     }
-    await syncBlindDateProjection(client, sessionId, sync.state);
+    await syncStoryProjections(client, sessionId, sync.state);
+    return insertedEvents;
   });
-  response.status(204).end();
+  response.status(200).json({ sessionId, syncedAt: new Date().toISOString(), eventsPersisted });
 });
 
 function score(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(100, Math.round(value))) : fallback;
 }
 
-async function syncBlindDateProjection(client: import("pg").PoolClient, sessionId: string, state: Record<string, unknown>): Promise<void> {
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function text(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value.slice(0, 2000) : fallback;
+}
+
+type ParticipantRow = { id: string; character_id: string | null; participant_type: "PLAYER" | "CHARACTER" };
+
+async function syncStoryProjections(client: import("pg").PoolClient, sessionId: string, state: Record<string, unknown>): Promise<void> {
+  const participants = await client.query<ParticipantRow>(
+    "SELECT id, character_id, participant_type FROM session_participants WHERE session_id=$1",
+    [sessionId]
+  );
+  const participantByStoryId = new Map<string, string>();
+  for (const participant of participants.rows) {
+    participantByStoryId.set(participant.participant_type === "PLAYER" ? "PLAYER" : participant.character_id ?? participant.id, participant.id);
+    if (participant.character_id) participantByStoryId.set(participant.character_id, participant.id);
+  }
+
   const logs = Array.isArray(state.log) ? state.log : [];
   for (const rawLog of logs) {
     if (typeof rawLog !== "object" || rawLog === null) continue;
@@ -304,24 +380,113 @@ async function syncBlindDateProjection(client: import("pg").PoolClient, sessionI
       }]
     );
   }
-  const relationship = typeof state.relationship === "object" && state.relationship !== null ? state.relationship as Record<string, unknown> : null;
-  if (!relationship) return;
-  const participants = await client.query<{ id: string; participant_type: "PLAYER" | "CHARACTER" }>(
-    "SELECT id, participant_type FROM session_participants WHERE session_id=$1", [sessionId]
+  const relationships = record(state.directionalRelationships);
+  for (const [direction, rawRelationship] of Object.entries(relationships)) {
+    const [sourceStoryId, targetStoryId] = direction.split("->", 2);
+    const sourceParticipantId = participantByStoryId.get(sourceStoryId);
+    const targetParticipantId = participantByStoryId.get(targetStoryId);
+    if (!sourceParticipantId || !targetParticipantId || sourceParticipantId === targetParticipantId) continue;
+    await upsertRelationship(client, sessionId, sourceParticipantId, targetParticipantId, record(rawRelationship));
+  }
+  // Compatibility projection for snapshots made by the original one-on-one engine.
+  if (Object.keys(relationships).length === 0) {
+    const player = participants.rows.find((participant) => participant.participant_type === "PLAYER");
+    const firstCharacter = participants.rows.find((participant) => participant.participant_type === "CHARACTER");
+    if (player && firstCharacter) await upsertRelationship(client, sessionId, player.id, firstCharacter.id, record(state.relationship));
+  }
+
+  const story = record(state.story);
+  const privateState = record(state.privateState);
+  const currentLocation = text(privateState.active === true ? privateState.location : story.currentLocation, text(state.location));
+  const phase = text(story.phase, "arrival");
+  const mood = text(story.mood, "curious");
+  const heat = score(state.heat, 0);
+  await client.query(
+    `INSERT INTO session_story_state (session_id,current_location,phase,mood,heat,progression)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (session_id) DO UPDATE SET current_location=EXCLUDED.current_location, phase=EXCLUDED.phase,
+       mood=EXCLUDED.mood, heat=EXCLUDED.heat, progression=EXCLUDED.progression, updated_at=now()`,
+    [sessionId, currentLocation, phase, mood, heat, story]
   );
-  const player = participants.rows.find((item) => item.participant_type === "PLAYER");
-  const character = participants.rows.find((item) => item.participant_type === "CHARACTER");
-  if (!player || !character) return;
+  const activeScene = await client.query<{ id: string }>(
+    `UPDATE scenes SET location=$2, phase=$3, mood=$4, heat=$5, is_private=$6
+     WHERE id=(SELECT id FROM scenes WHERE session_id=$1 AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1)
+     RETURNING id`,
+    [sessionId, currentLocation, phase, mood, heat, privateState.active === true]
+  );
+  if (!activeScene.rowCount) {
+    await client.query("INSERT INTO scenes(session_id,location,phase,mood,heat,is_private) VALUES($1,$2,$3,$4,$5,$6)",
+      [sessionId, currentLocation, phase, mood, heat, privateState.active === true]);
+  }
+
+  const discoveries = record(state.discoveredTraitsByCharacter);
+  for (const [characterId, rawTraits] of Object.entries(discoveries)) {
+    if (!participantByStoryId.has(characterId)) continue;
+    for (const [traitKey, value] of Object.entries(record(rawTraits))) {
+      const discovered = value === "DISCOVERED";
+      await client.query(
+        `INSERT INTO session_trait_discoveries(session_id,character_id,trait_key,discovered,discovered_at,metadata)
+         VALUES($1,$2,$3,$4,CASE WHEN $4 THEN now() ELSE NULL END,$5)
+         ON CONFLICT(session_id,character_id,trait_key) DO UPDATE SET
+           discovered=session_trait_discoveries.discovered OR EXCLUDED.discovered,
+           discovered_at=COALESCE(session_trait_discoveries.discovered_at, EXCLUDED.discovered_at), metadata=EXCLUDED.metadata`,
+        [sessionId, characterId, traitKey.slice(0, 100), discovered, { state: text(value) }]
+      );
+    }
+  }
+
+  const roles = record(state.assignedRoles);
+  for (const [storyParticipantId, roleKey] of Object.entries(roles)) {
+    const participantId = participantByStoryId.get(storyParticipantId);
+    if (!participantId || typeof roleKey !== "string") continue;
+    const role = await client.query<{ id: string }>(
+      "SELECT id FROM scenario_roles WHERE lower(replace(name,' ','_'))=lower($1) LIMIT 1",
+      [roleKey]
+    );
+    if (!role.rowCount) continue;
+    await client.query(
+      `INSERT INTO role_assignments(session_id,participant_id,role_id) VALUES($1,$2,$3)
+       ON CONFLICT(session_id,participant_id) DO UPDATE SET role_id=EXCLUDED.role_id`,
+      [sessionId, participantId, role.rows[0].id]
+    );
+  }
+
+  const directorCards = record(state.directorCards);
+  for (const [cardKey, rawCardState] of Object.entries(directorCards)) {
+    const card = await client.query<{ id: string }>("SELECT id FROM director_cards WHERE card_key=$1", [cardKey]);
+    if (!card.rowCount) continue;
+    const cardState = record(rawCardState);
+    const applied = cardState.applied === true;
+    const available = cardState.available !== false;
+    const appliedAt = typeof cardState.appliedAtEvent === "number" ? Math.round(cardState.appliedAtEvent) : null;
+    await client.query(
+      `INSERT INTO session_director_card_state(session_id,director_card_id,is_available,is_applied,applied_event_number,metadata)
+       VALUES($1,$2,$3,$4,$5,$6)
+       ON CONFLICT(session_id,director_card_id) DO UPDATE SET is_available=EXCLUDED.is_available,
+         is_applied=session_director_card_state.is_applied OR EXCLUDED.is_applied,
+         applied_event_number=COALESCE(session_director_card_state.applied_event_number, EXCLUDED.applied_event_number),
+         metadata=EXCLUDED.metadata, updated_at=now()`,
+      [sessionId, card.rows[0].id, available, applied, appliedAt, cardState]
+    );
+  }
+}
+
+async function upsertRelationship(
+  client: import("pg").PoolClient, sessionId: string, sourceParticipantId: string, targetParticipantId: string, relationship: Record<string, unknown>
+): Promise<void> {
   const values = [
     score(relationship.attraction, 32), score(relationship.trust, 28), score(relationship.comfort, 30),
     score(relationship.curiosity, 45), score(relationship.jealousy, 0), score(relationship.tension, 18),
     score(relationship.attachment, 12), score(relationship.competition, 0), score(relationship.desire, 15), score(relationship.confidence, 50)
   ];
   await client.query(
-    `UPDATE relationship_states SET attraction=$4, trust=$5, comfort=$6, curiosity=$7, jealousy=$8,
-       tension=$9, attachment=$10, competition=$11, desire=$12, confidence=$13, updated_at=now()
-     WHERE session_id=$1 AND source_participant_id=$2 AND target_participant_id=$3`,
-    [sessionId, player.id, character.id, ...values]
+    `INSERT INTO relationship_states(session_id,source_participant_id,target_participant_id,attraction,trust,comfort,curiosity,jealousy,tension,attachment,competition,desire,confidence,metadata)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+     ON CONFLICT(session_id,source_participant_id,target_participant_id) DO UPDATE SET attraction=EXCLUDED.attraction,
+       trust=EXCLUDED.trust,comfort=EXCLUDED.comfort,curiosity=EXCLUDED.curiosity,jealousy=EXCLUDED.jealousy,
+       tension=EXCLUDED.tension,attachment=EXCLUDED.attachment,competition=EXCLUDED.competition,desire=EXCLUDED.desire,
+       confidence=EXCLUDED.confidence,metadata=EXCLUDED.metadata,updated_at=now()`,
+    [sessionId, sourceParticipantId, targetParticipantId, ...values, relationship]
   );
 }
 

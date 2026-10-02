@@ -10,16 +10,28 @@ data class FictionalAdult(
     val age: Int,
     val gender: String = "Unspecified",
     val pronouns: String = "",
+    val avatarReference: String = "",
     val description: String = "",
     val personality: Map<String, Int>,
     val communication: String,
     val flirtingStyle: String,
     val intimacyEnergy: String,
     val pace: String,
+    val socialProfile: SocialProfile = SocialProfile(),
+    val privateProfile: PrivateProfile = PrivateProfile(),
+    val desireProfile: DesireProfile = DesireProfile(),
     val boundaries: Map<String, Boundary> = mapOf("private_moment" to Boundary.NEEDS_TRUST),
     val hiddenTraits: Set<String> = emptySet()
 ) {
     val isAdult: Boolean get() = age >= 18
+    fun resolvedSocialProfile(): SocialProfile = socialProfile.copy(
+        communicationStyle = if (socialProfile.communicationStyle == "Soft-spoken" && communication != "Soft-spoken") communication else socialProfile.communicationStyle,
+        flirtingStyle = if (socialProfile.flirtingStyle == "Slow Burn" && flirtingStyle != "Slow Burn") flirtingStyle else socialProfile.flirtingStyle
+    )
+    fun resolvedPrivateProfile(): PrivateProfile = privateProfile.copy(
+        pace = runCatching { PrivatePace.valueOf(pace.uppercase().replace(' ', '_')) }.getOrDefault(privateProfile.pace),
+        style = if (privateProfile.style == setOf("Romantic") && intimacyEnergy.isNotBlank()) setOf(intimacyEnergy) else privateProfile.style
+    )
 }
 
 @Serializable enum class Boundary { COMFORTABLE, NEEDS_TRUST, HIGH_CHEMISTRY_ONLY, DISABLED }
@@ -41,7 +53,11 @@ enum class GameAction(val label: String, val timing: Boolean = false) {
     TEASE("TEASE", true), FLIRT("FLIRT", true), COMPLIMENT("COMPLIMENT", true), CHANGE_TOPIC("CHANGE TOPIC"),
     MOVE_CLOSER("MOVE CLOSER"), ORDER_DRINK("ORDER ANOTHER DRINK"), CHANGE_LOCATION("CHANGE LOCATION"),
     INVITE_CONTINUE("INVITE TO CONTINUE DATE"), STEP_BACK("STEP BACK"), END_DATE("END DATE"),
-    LET_THEM_TALK("LET THEM TALK"), DIRECTOR_CARD("DIRECTOR CARD")
+    LET_THEM_TALK("LET THEM TALK"), DIRECTOR_CARD("DIRECTOR CARD"), JOIN("JOIN"), REACT("REACT"),
+    SHIFT_ATTENTION("SHIFT ATTENTION"), FOCUS_CHARACTER("FOCUS CHARACTER"), CHANGE_MOOD("CHANGE MOOD"),
+    CHANGE_MUSIC("CHANGE MUSIC"), START_ACTIVITY("START ACTIVITY"), PRIVATE_MOMENT("PRIVATE MOMENT"),
+    START_ROLEPLAY("START ROLEPLAY"), CONTINUE_NIGHT("CONTINUE NIGHT"), NEXT_MORNING("NEXT MORNING"),
+    NEXT_DAY("NEXT DAY"), RETURN_TO_GROUP("RETURN TO GROUP")
 }
 
 enum class PrivateChoice(val label: String) {
@@ -82,20 +98,40 @@ data class RelationshipState(
     val requiredHeat: Int,
     val compatibilityTags: Set<String>,
     val icon: String,
-    val description: String
+    val description: String,
+    val energy: String = "ROMANTIC",
+    val unlockRules: Set<String> = emptySet()
 )
 
 @Serializable data class BlindDateState(
     val character: FictionalAdult,
     val location: DateLocation,
+    val mode: StoryMode = StoryMode.ONE_ON_ONE,
+    val scenario: ScenarioDefinition = starterScenarios.first(),
+    val participants: List<FictionalAdult> = listOf(character),
+    val circle: Circle? = null,
+    val relationshipStart: StartingRelationship = StartingRelationship.COMPLETE_STRANGERS,
+    val playerDesireProfile: DesireProfile = DesireProfile(),
     val heat: Int = 18,
     val relationship: RelationshipState = RelationshipState(),
+    val directionalRelationships: Map<String, RelationshipState> = mapOf(
+        relationshipKey(PLAYER_PARTICIPANT, character.id) to RelationshipState(),
+        relationshipKey(character.id, PLAYER_PARTICIPANT) to RelationshipState()
+    ),
     val discoveries: Map<String, TraitKnowledge> = character.personality.keys.associateWith { TraitKnowledge.UNKNOWN },
+    val discoveredTraitsByCharacter: Map<String, Map<String, TraitKnowledge>> = mapOf(character.id to character.personality.keys.associateWith { TraitKnowledge.UNKNOWN }),
+    val assignedRoles: Map<String, String> = emptyMap(),
+    val directorCards: Map<String, DirectorCardState> = starterDirectorCards.associate { it.id to DirectorCardState(it.id) },
+    val story: StoryProgression = StoryProgression(currentLocation = location.label),
+    val privateState: PrivateMomentState = PrivateMomentState(),
     val log: List<SceneLog> = emptyList(),
     val privateOfferVisible: Boolean = false,
     val inPrivateMoment: Boolean = false,
     val ended: Boolean = false,
-    val selectedCard: IntimacyCard? = null
+    val selectedCard: IntimacyCard? = null,
+    val focusCharacterId: String? = null,
+    val selectedDirectorCardId: String? = null,
+    val unlockedRoutes: Set<String> = emptySet()
 )
 
 fun demoAdults(): List<FictionalAdult> = listOf(
@@ -104,6 +140,9 @@ fun demoAdults(): List<FictionalAdult> = listOf(
         description = "A graphic designer who watches a room before choosing a moment.",
         personality = mapOf("Mysterious" to 4, "Shy" to 4, "Curious" to 3, "Intense" to 4),
         communication = "Soft-spoken", flirtingStyle = "Slow Burn", intimacyEnergy = "Romantic", pace = "Slow",
+        socialProfile = SocialProfile("Soft-spoken", "Slow Burn", "Thoughtful", "Observant"),
+        privateProfile = PrivateProfile(PrivatePace.SLOW, PrivateIntensity.INTENSE, setOf("Romantic", "Responsive"), PrivateInitiation.RARELY, PrivacyPreference.PRIVATE),
+        desireProfile = DesireProfile(mapOf("Romantic" to InterestLevel.HIGH_INTEREST, "Slow Burn" to InterestLevel.HIGH_INTEREST, "Secret Attraction" to InterestLevel.INTERESTED)),
         hiddenTraits = setOf("Intense")
     ),
     FictionalAdult(
@@ -111,6 +150,9 @@ fun demoAdults(): List<FictionalAdult> = listOf(
         description = "A travel photographer with a quick laugh and a sharper observation.",
         personality = mapOf("Playful" to 5, "Observant" to 4, "Bold" to 3, "Romantic" to 3),
         communication = "Witty", flirtingStyle = "Playful", intimacyEnergy = "Playful", pace = "Balanced",
+        socialProfile = SocialProfile("Witty", "Playful", "Expressive", "Inclusive"),
+        privateProfile = PrivateProfile(PrivatePace.BALANCED, PrivateIntensity.PASSIONATE, setOf("Playful", "Romantic", "Experimental"), PrivateInitiation.OFTEN, PrivacyPreference.FLEXIBLE),
+        desireProfile = DesireProfile(mapOf("Romantic" to InterestLevel.INTERESTED, "Roleplay" to InterestLevel.INTERESTED, "Experimental" to InterestLevel.CURIOUS)),
         boundaries = mapOf("private_moment" to Boundary.COMFORTABLE)
     ),
     FictionalAdult(
@@ -118,6 +160,9 @@ fun demoAdults(): List<FictionalAdult> = listOf(
         description = "A musician who is calm until a challenge makes him light up.",
         personality = mapOf("Calm" to 4, "Teasing" to 4, "Competitive" to 3, "Protective" to 3),
         communication = "Direct", flirtingStyle = "Confident", intimacyEnergy = "Responsive", pace = "Balanced",
+        socialProfile = SocialProfile("Direct", "Confident", "Steady", "Focused"),
+        privateProfile = PrivateProfile(PrivatePace.BALANCED, PrivateIntensity.PASSIONATE, setOf("Responsive", "Assertive"), PrivateInitiation.SOMETIMES, PrivacyPreference.PRIVATE),
+        desireProfile = DesireProfile(mapOf("Romantic" to InterestLevel.INTERESTED, "Rival Attraction" to InterestLevel.CURIOUS, "Control" to InterestLevel.CURIOUS)),
         boundaries = mapOf("private_moment" to Boundary.NEEDS_TRUST)
     )
 )

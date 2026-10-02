@@ -35,15 +35,26 @@ export const sessionSchema = z.object({
   mode: z.enum(["ONE_ON_ONE", "CIRCLE"]),
   participantCharacterIds: z.array(uuid).min(1).max(5),
   relationshipStart: z.string().min(1).max(60),
+  circleId: uuid.nullable().optional(),
   state: jsonRecord.default({})
+}).superRefine((value, context) => {
+  if (value.mode === "ONE_ON_ONE" && value.participantCharacterIds.length !== 1) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["participantCharacterIds"], message: "One-on-one stories need exactly one character." });
+  }
+  if (value.mode === "CIRCLE" && value.participantCharacterIds.length < 2) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["participantCharacterIds"], message: "Circle stories need two to five characters." });
+  }
 });
 
 export const circleSchema = z.object({
   name: z.string().trim().min(1).max(80),
-  characterIds: z.array(uuid).min(2).max(5)
+  characterIds: z.array(uuid).min(2).max(5),
+  startingRelationship: z.string().trim().min(1).max(60).default("PARTY_GROUP"),
+  configuration: jsonRecord.default({})
 });
 
 export const eventSchema = z.object({
+  clientEventId: uuid.nullable().optional(),
   actorParticipantId: uuid.nullable().optional(),
   targetParticipantId: uuid.nullable().optional(),
   eventType: z.string().regex(/^[A-Z_]{3,80}$/),

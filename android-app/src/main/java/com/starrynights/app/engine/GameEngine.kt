@@ -10,17 +10,19 @@ class IntimacyCompatibilityEngine {
         if (!state.character.isAdult || boundary == Boundary.DISABLED) return false
         val requiredTrust = if (boundary == Boundary.NEEDS_TRUST) 62 else 45
         val requiredHeat = if (boundary == Boundary.HIGH_CHEMISTRY_ONLY) 65 else 48
-        val energyCompatible = state.character.intimacyEnergy.isNotBlank()
+        val energyCompatible = state.character.resolvedPrivateProfile().style.isNotEmpty() &&
+            state.character.desireProfile.compatibleWith(state.playerDesireProfile)
         return state.relationship.attraction >= 55 && state.relationship.comfort >= 55 &&
-            state.relationship.trust >= requiredTrust && state.heat >= requiredHeat && energyCompatible
+            state.relationship.trust >= requiredTrust && state.relationship.desire >= 35 && state.heat >= requiredHeat && energyCompatible
     }
 
     fun availableCards(state: BlindDateState): List<IntimacyCard> {
-        val energy = state.character.intimacyEnergy.lowercase()
-        val pace = state.character.pace.lowercase()
+        val privateProfile = state.character.resolvedPrivateProfile()
+        val energy = privateProfile.style.joinToString(" ").lowercase()
+        val pace = privateProfile.pace.name.lowercase()
         return intimacyDeck.filter { card ->
             state.heat >= card.requiredHeat &&
-                (card.compatibilityTags.any { it.lowercase() in energy || it.lowercase() in pace } || card.intensity <= 2)
+                (card.compatibilityTags.any { it.lowercase() in energy || it.lowercase() in pace || state.character.desireProfile.level(it) >= InterestLevel.INTERESTED } || card.intensity <= 2)
         }
     }
 }
@@ -73,7 +75,13 @@ class RelationshipEngine {
             GameAction.STEP_BACK -> state.copy(comfort = add(state.comfort, 6), trust = add(state.trust, 4), tension = add(state.tension, -5))
             GameAction.LET_THEM_TALK -> state.copy(curiosity = add(state.curiosity, 4), trust = add(state.trust, 2))
             GameAction.DIRECTOR_CARD -> state.copy(curiosity = add(state.curiosity, 5), tension = add(state.tension, 3))
-            GameAction.END_DATE -> state
+            GameAction.JOIN, GameAction.FOCUS_CHARACTER -> state.copy(trust = add(state.trust, 3 * quality), attachment = add(state.attachment, 3 * quality))
+            GameAction.REACT -> state.copy(attraction = add(state.attraction, 4 * quality), tension = add(state.tension, 3 * quality))
+            GameAction.SHIFT_ATTENTION -> state.copy(jealousy = add(state.jealousy, if (success) -2 else 5), confidence = add(state.confidence, 2))
+            GameAction.CHANGE_MOOD, GameAction.CHANGE_MUSIC -> state.copy(comfort = add(state.comfort, 4), tension = add(state.tension, -3))
+            GameAction.START_ACTIVITY -> state.copy(curiosity = add(state.curiosity, 5), comfort = add(state.comfort, 2 * quality))
+            GameAction.PRIVATE_MOMENT, GameAction.START_ROLEPLAY -> state.copy(desire = add(state.desire, 4 * quality), curiosity = add(state.curiosity, 4 * quality))
+            GameAction.CONTINUE_NIGHT, GameAction.NEXT_MORNING, GameAction.NEXT_DAY, GameAction.RETURN_TO_GROUP, GameAction.END_DATE -> state
         }
     }
 }
@@ -85,9 +93,10 @@ class HeatEngine {
             GameAction.EYE_CONTACT, GameAction.SMILE, GameAction.COMPLIMENT -> if (success) 4 else -2
             GameAction.MOVE_CLOSER, GameAction.APPROACH -> if (success) 3 else -5
             GameAction.INVITE_CONTINUE -> if (success) 5 else -3
-            GameAction.STEP_BACK, GameAction.CHANGE_TOPIC -> -2
-            GameAction.DIRECTOR_CARD -> 3
-            else -> 1
+            GameAction.DIRECTOR_CARD, GameAction.START_ROLEPLAY -> 3
+            GameAction.PRIVATE_MOMENT -> if (success) 4 else -3
+            GameAction.STEP_BACK, GameAction.CHANGE_TOPIC, GameAction.CHANGE_MOOD -> -2
+            else -> 0
         }
         val chemistryBonus = if (relationship.attraction > 55 && relationship.comfort > 50) 1 else 0
         return (heat + actionDelta + chemistryBonus).coerceIn(0, 100)
@@ -99,50 +108,28 @@ class KotlinGameEngine(
     private val dialogue: RuleBasedDialogueEngine = RuleBasedDialogueEngine(),
     private val relationships: RelationshipEngine = RelationshipEngine(),
     private val heatEngine: HeatEngine = HeatEngine(),
-    private val random: Random = Random.Default
+    private val random: Random = Random.Default,
+    private val storySimulation: StorySimulationEngine = StorySimulationEngine()
 ) {
-    fun start(character: FictionalAdult, location: DateLocation): BlindDateState = BlindDateState(
-        character = character,
-        location = location,
-        log = listOf(
-            SceneLog(speaker = "SYSTEM", text = "BLIND DATE — ${location.label.uppercase()}", cue = "✦", isSystem = true),
-            SceneLog(speaker = "SYSTEM", text = "${location.ambience} ${character.name} is already there. Their deeper traits are UNKNOWN.", cue = "☾", isSystem = true),
-            SceneLog(speaker = character.name, text = "\"Hi. I am glad you made it.\"", cue = "👀")
-        )
+    fun start(character: FictionalAdult, location: DateLocation): BlindDateState = storySimulation.start(
+        characters = listOf(character), scenario = starterScenarios.first(), location = location,
+        mode = StoryMode.ONE_ON_ONE, relationshipStart = StartingRelationship.COMPLETE_STRANGERS
     )
 
-    fun perform(state: BlindDateState, action: GameAction, timingScore: Float = 0.7f): BlindDateState {
-        if (state.ended || state.inPrivateMoment) return state
-        val traitBias = when {
-            action == GameAction.TEASE && "Teasing" in state.character.personality -> .18f
-            action == GameAction.OBSERVE && "Mysterious" in state.character.personality -> .20f
-            action == GameAction.COMPLIMENT && "Romantic" in state.character.personality -> .16f
-            action == GameAction.STEP_BACK -> .28f
-            else -> 0f
-        }
-        val success = action == GameAction.OBSERVE || action == GameAction.STEP_BACK || timingScore + traitBias > 0.57f
-        val updatedRelationship = relationships.apply(state.relationship, action, success)
-        val updatedHeat = heatEngine.update(state.heat, action, success, updatedRelationship)
-        val reveal = chooseDiscovery(state, action, success)
-        val updatedDiscoveries = if (reveal == null) state.discoveries else state.discoveries + (reveal to TraitKnowledge.DISCOVERED)
-        val actionLine = SceneLog(speaker = "YOU", text = action.label, cue = if (success) "✦" else "…")
-        val discoveryLine = reveal?.let { SceneLog(speaker = "DISCOVERED", text = "${state.character.name}: ${it.uppercase()} — their behaviour finally makes a little more sense.", cue = "◇", isSystem = true) }
-        val reaction = dialogue.reaction(state.character, action, success)
-        val npc = if (action == GameAction.END_DATE) null else dialogue.autonomous(state.character, updatedRelationship)
-        val result = state.copy(
-            relationship = updatedRelationship,
-            heat = updatedHeat,
-            discoveries = updatedDiscoveries,
-            privateOfferVisible = state.privateOfferVisible || (action == GameAction.INVITE_CONTINUE && compatibility.canOfferPrivateMoment(state.copy(relationship = updatedRelationship, heat = updatedHeat))),
-            ended = action == GameAction.END_DATE,
-            log = state.log + listOfNotNull(actionLine, reaction, discoveryLine, npc)
-        )
-        return if (result.privateOfferVisible && !state.privateOfferVisible) result.copy(log = result.log + SceneLog(speaker = "SYSTEM", text = "CONTINUE PRIVATE MOMENT is available. It is optional, and either person can slow down or stop at any time.", cue = "☾", isSystem = true)) else result
-    }
+    fun startStory(
+        characters: List<FictionalAdult>, scenario: ScenarioDefinition, location: DateLocation,
+        mode: StoryMode, relationshipStart: StartingRelationship, circle: Circle? = null, roles: Map<String, String> = emptyMap()
+    ): BlindDateState = storySimulation.start(characters, scenario, location, mode, relationshipStart, circle, roles)
 
-    fun enterPrivateMoment(state: BlindDateState): BlindDateState = if (compatibility.canOfferPrivateMoment(state)) {
-        state.copy(inPrivateMoment = true, log = state.log + SceneLog(speaker = "SYSTEM", text = "PRIVATE MOMENT — choose a compatible story card, then steer every beat together.", cue = "☾", isSystem = true))
-    } else state
+    fun perform(state: BlindDateState, action: GameAction, timingScore: Float = 0.7f, targetId: String? = state.focusCharacterId): BlindDateState =
+        storySimulation.perform(state, action, timingScore, targetId)
+
+    fun focusCharacter(state: BlindDateState, characterId: String): BlindDateState = storySimulation.focus(state, characterId)
+    fun applyDirectorCard(state: BlindDateState, card: DirectorCard): BlindDateState = storySimulation.applyDirectorCard(state, card)
+    fun continueStory(state: BlindDateState, action: GameAction): BlindDateState = storySimulation.advanceStory(state, action)
+    fun returnToGroup(state: BlindDateState): BlindDateState = storySimulation.returnToGroup(state)
+
+    fun enterPrivateMoment(state: BlindDateState, location: String = "Private Lounge"): BlindDateState = storySimulation.enterPrivate(state, location)
 
     fun selectCard(state: BlindDateState, card: IntimacyCard): BlindDateState = state.copy(
         selectedCard = card,
@@ -161,25 +148,18 @@ class KotlinGameEngine(
             attachment = (state.relationship.attachment + if (choice == PrivateChoice.CONTINUE) 4 else 1).coerceAtMost(100),
             comfort = (state.relationship.comfort + if (choice == PrivateChoice.SLOW_DOWN || choice == PrivateChoice.STOP_SCENE) 3 else 1).coerceAtMost(100)
         )
-        return state.copy(
-            heat = (state.heat + heatChange).coerceIn(0, 100), relationship = after,
+        val focusedCharacterId = state.focusCharacterId ?: state.character.id
+        val directional = state.directionalRelationships + (relationshipKey(PLAYER_PARTICIPANT, focusedCharacterId) to after)
+        val updated = state.copy(
+            heat = (state.heat + heatChange).coerceIn(0, 100), relationship = after, directionalRelationships = directional,
             inPrivateMoment = choice != PrivateChoice.STOP_SCENE,
+            privateState = state.privateState.copy(active = choice != PrivateChoice.STOP_SCENE),
             log = state.log + SceneLog(speaker = "SYSTEM", text = text, cue = "♡", isSystem = true)
         )
+        return if (choice == PrivateChoice.STOP_SCENE) storySimulation.returnToGroup(updated) else updated
     }
 
     fun availableIntimacyCards(state: BlindDateState): List<IntimacyCard> = compatibility.availableCards(state)
 
-    private fun chooseDiscovery(state: BlindDateState, action: GameAction, success: Boolean): String? {
-        if (!success) return null
-        val candidates = state.discoveries.filterValues { it == TraitKnowledge.UNKNOWN }.keys
-        val preferred = when (action) {
-            GameAction.OBSERVE -> candidates.filter { it in setOf("Mysterious", "Observant", "Reserved") }
-            GameAction.TEASE -> candidates.filter { it in setOf("Teasing", "Playful", "Competitive") }
-            GameAction.COMPLIMENT -> candidates.filter { it in setOf("Romantic", "Shy", "Intense") }
-            else -> candidates.toList()
-        }
-        return (preferred.ifEmpty { candidates.toList() }).randomOrNull(random)
-    }
 }
 

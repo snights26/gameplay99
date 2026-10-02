@@ -11,7 +11,7 @@
 
 1. Create a Neon project and copy its pooled connection string.
 2. Copy `.env.example` to `backend/.env` and set `DATABASE_URL`. Do not commit this file.
-3. From `F:\StarryNights\backend`, run `npm run db:setup`. It applies [`database/schema.sql`](database/schema.sql) and [`database/seed.sql`](database/seed.sql) safely with idempotent statements. You may instead run those files in the Neon SQL Editor.
+3. From `F:\StarryNights\backend`, run `npm run db:setup`. It applies [`database/schema.sql`](database/schema.sql), every additive file in [`database/migrations`](database/migrations), and [`database/seed.sql`](database/seed.sql) safely with idempotent statements. It does not reset or delete existing Neon data. You may instead run those files in the Neon SQL Editor in that order.
 
 Example `backend/.env`:
 
@@ -101,5 +101,7 @@ SELECT * FROM session_snapshots ORDER BY created_at DESC;
 
 The backend is structured for a Vercel serverless deployment: authoritative state lives in Neon, `DATABASE_URL`, `PORT`, and `ALLOWED_ORIGIN` are environment configuration, and `backend/api/index.ts` exports the Express application without opening a local listener on Vercel. [`backend/vercel.json`](backend/vercel.json) rewrites requests to that handler.
 
-To deploy later, select `F:\StarryNights\backend` as the Vercel project root and configure at least `DATABASE_URL` and a restrictive production `ALLOWED_ORIGIN`. Use the deployed HTTPS URL as the Android release `API_BASE_URL`. No Vercel deployment has been performed by this project setup.
+The connected Vercel project is served at `https://gameplay99.vercel.app/`. In Vercel, use the GitHub repository `snights26/gameplay99`, production branch `main`, and `backend` as the root directory. Configure `DATABASE_URL` (the Neon pooled connection string) and a restrictive production `ALLOWED_ORIGIN`; do not put either value in Git or the Android app. After a source deployment, apply any new additive database migrations with `npm run db:setup`, then verify `https://gameplay99.vercel.app/api/v1/health`.
+
+Android deliberately keeps its release API URL as a centralized placeholder in [`android-app/src/main/java/com/starrynights/app/data/ApiConfiguration.kt`](android-app/src/main/java/com/starrynights/app/data/ApiConfiguration.kt) until the completed Vercel deployment has been verified. The eventual HTTPS URL is configured once through the build configuration, never scattered through gameplay code.
 
